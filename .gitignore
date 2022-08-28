@@ -25,3 +25,11 @@
 *.exe
 *.out
 *.app
+
+# CMake
+build
+
+# CLion
+.idea
+cmake-build-debug
+cmake-build-release

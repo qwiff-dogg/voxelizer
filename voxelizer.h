@@ -45,6 +45,8 @@
 #ifndef VOXELIZER_H
 #define VOXELIZER_H
 
+#include <stdbool.h>    // hughh
+
 // ------------------------------------------------------------------------------------------------
 // VOXELIZER PUBLIC API
 //
@@ -95,10 +97,21 @@ vx_point_cloud_t* vx_voxelize_pc(vx_mesh_t const* mesh, // The input mesh
                                  float voxelsizex,      // Voxel size on X-axis
                                  float voxelsizey,      // Voxel size on Y-axis
                                  float voxelsizez,      // Voxel size on Z-axis
-                                 float precision);      // A precision factor that reduces "holes artifact
+                                 float precision,       // A precision factor that reduces "holes artifact
                                                         // usually a precision = voxelsize / 10. works ok
+                                 bool fill_volume);     // Whether to fill the volume or generate only the shell.
+
 
 // vx_voxelize: Voxelizes a triangle mesh to a triangle mesh representing cubes
+vx_mesh_t* vx_voxelize(vx_mesh_t const* mesh,       // The input mesh
+        float voxelsizex,                           // Voxel size on X-axis
+        float voxelsizey,                           // Voxel size on Y-axis
+        float voxelsizez,                           // Voxel size on Z-axis
+        float precision,                            // A precision factor that reduces "holes" artifact
+                                                    // usually a precision = voxelsize / 10. works ok.
+        bool fill_volume);                          // Whether to fill the volume or generate only the shell.
+
+// Overloaded for compatibility and clarity. (Filling a voxel volume mesh is mainly useful for debugging.)
 vx_mesh_t* vx_voxelize(vx_mesh_t const* mesh,       // The input mesh
         float voxelsizex,                           // Voxel size on X-axis
         float voxelsizey,                           // Voxel size on Y-axis
@@ -159,7 +172,6 @@ void vx_point_cloud_free(vx_point_cloud_t* pointcloud);
 #ifdef VOXELIZER_IMPLEMENTATION
 
 #include <math.h>       // ceil, fabs & al.
-#include <stdbool.h>    // hughh
 #include <string.h>     // memcpy
 
 #define VOXELIZER_EPSILON               (0.0000001)
@@ -301,6 +313,139 @@ bool vx__hash_table_insert(vx_hash_table_t* table,
     return true;
 }
 
+typedef struct vx_grid_node {
+    vx_aabb_t aabb;
+    vx_vec3_t position;
+    bool is_filled;
+} vx_grid_node_t;
+
+typedef struct vx_grid_vec3 {
+    size_t x;
+    size_t y;
+    size_t z;
+} vx_grid_vec3_t;
+
+typedef struct vx_grid {
+    vx_grid_node_t* nodes;
+    vx_grid_vec3_t size;
+} vx_grid_t;
+
+size_t vx__grid_node_offset(vx_grid_t* grid, vx_grid_vec3 position)
+{
+    size_t offset = position.x * grid->size.y * grid->size.z +
+        position.y * grid->size.z + position.z;
+    VX_ASSERT(offset < grid->size.x * grid->size.y * grid->size.z);
+    return offset;
+}
+
+vx_grid_t* vx__grid_alloc(vx_aabb_t* span, vx_vec3_t* vs)
+{
+    vx_grid_vec3_t size = {
+            .x = (size_t) round((span->max.x - span->min.x) / vs->x),
+            .y = (size_t) round((span->max.y - span->min.y) / vs->y),
+            .z = (size_t) round((span->max.z - span->min.z) / vs->z),
+    };
+    // The span is min- and max-inclusive, so we need to add 1 to the grid size.
+    size.x += 1;
+    size.y += 1;
+    size.z += 1;
+
+    vx_grid_t* grid = VX_MALLOC(vx_grid_t, 1);
+    grid->nodes = VX_CALLOC(vx_grid_node_t, size.x * size.y * size.z);
+    grid->size = size;
+
+    // Determines the precision of the grid node's AABB.
+    // The node's AABB is used to test floating-point coordinates.
+    float aabb_precision = 0.25f;
+
+    for (size_t x = 0; x < size.x; x++) {
+        for (size_t y = 0; y < size.y; y++) {
+            for (size_t z = 0; z < size.z; z++) {
+                vx_vec3_t position = {
+                        .x = span->min.x + x * vs->x,
+                        .y = span->min.y + y * vs->y,
+                        .z = span->min.z + z * vs->z,
+                };
+                vx_aabb_t aabb = {
+                    .min = {
+                        .x = position.x - (vs->x * aabb_precision),
+                        .y = position.y - (vs->y * aabb_precision),
+                        .z = position.z - (vs->z * aabb_precision),
+                    },
+                    .max = {
+                        .x = position.x + (vs->x * aabb_precision),
+                        .y = position.y + (vs->y * aabb_precision),
+                        .z = position.z + (vs->z * aabb_precision),
+                    },
+                };
+                size_t offset = vx__grid_node_offset(grid, {x, y, z});
+                vx_grid_node_t* node = &grid->nodes[offset];
+                node->aabb = aabb;
+                node->position = position;
+                node->is_filled = false;
+            }
+        }
+    }
+
+    return grid;
+}
+
+void vx__grid_free(vx_grid_t* grid)
+{
+    VX_FREE(grid->nodes);
+    VX_FREE(grid);
+}
+
+bool vx__grid_resolve_grid_position(vx_grid_t* grid, vx_vec3_t* voxel_position, vx_grid_vec3_t* out_grid_position)
+{
+    for (size_t x = 0; x < grid->size.x; x++) {
+        for (size_t y = 0; y < grid->size.y; y++) {
+            for (size_t z = 0; z < grid->size.z; z++) {
+                size_t offset = vx__grid_node_offset(grid, {x, y, z});
+                vx_aabb_t* aabb = &grid->nodes[offset].aabb;
+                if (aabb->min.x <= voxel_position->x &&
+                    aabb->min.y <= voxel_position->y &&
+                    aabb->min.z <= voxel_position->z &&
+                    aabb->max.x >= voxel_position->x &&
+                    aabb->max.y >= voxel_position->y &&
+                    aabb->max.z >= voxel_position->z) {
+                    out_grid_position->x = x;
+                    out_grid_position->y = y;
+                    out_grid_position->z = z;
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+void vx__grid_fill(vx_grid_t* grid, vx_vec3_t* voxel_position)
+{
+    vx_grid_vec3_t grid_position;
+    bool found = vx__grid_resolve_grid_position(grid, voxel_position, &grid_position);
+    VX_ASSERT(found);
+
+    size_t offset = vx__grid_node_offset(grid, grid_position);
+    grid->nodes[offset].is_filled = true;
+}
+
+bool vx__grid_is_filled(vx_grid_t* grid, vx_grid_vec3_t grid_position, vx_vec3_t* out_voxel_position)
+{
+    VX_ASSERT(grid_position.x < grid->size.x);
+    VX_ASSERT(grid_position.y < grid->size.y);
+    VX_ASSERT(grid_position.z < grid->size.z);
+
+    size_t offset = vx__grid_node_offset(grid, grid_position);
+    if (grid->nodes[offset].is_filled) {
+        *out_voxel_position = grid->nodes[offset].position;
+        return true;
+    } else {
+        return false;
+    }
+}
+
 void vx_mesh_free(vx_mesh_t* mesh)
 {
     VX_FREE(mesh->vertices);
@@ -386,6 +531,11 @@ void vx__vec3_sub(vx_vec3_t* a, vx_vec3_t* b)
 float vx__vec3_length2(vx_vec3_t* v)
 {
     return v->x * v->x + v->y * v->y + v->z * v->z;
+}
+
+float vx__vec3_length(vx_vec3_t* v)
+{
+    return sqrt(vx__vec3_length2(v));
 }
 
 void vx__vec3_add(vx_vec3_t* a, vx_vec3_t* b)
@@ -605,6 +755,115 @@ float vx__triangle_area(vx_triangle_t* triangle) {
     return sqrtf(powf(a0, 2.f) + powf(a1, 2.f) + powf(a2, 2.f)) * 0.5f;
 }
 
+/**
+ * Port of the Möller–Trumbore intersection algorithm.
+ * https://en.wikipedia.org/wiki/M%C3%B6ller%E2%80%93Trumbore_intersection_algorithm
+ *
+ * @param ray_origin The ray origin
+ * @param ray_dir The ray direction. Note: this vector must be normalized.
+ * @param tv0 Triangle vertex 0
+ * @param tv1 Triangle vertex 1
+ * @param tv2 Triangle vertex 2
+ * @param out_intersection Output variable for the intersection point.
+ * @return true if the ray intersects the triangle
+ */
+bool vx__ray_intersects_triangle(vx_vec3_t* ray_origin,
+    vx_vec3_t* ray_dir,
+    vx_vec3_t* tv0,
+    vx_vec3_t* tv1,
+    vx_vec3_t* tv2,
+    vx_vec3_t* out_intersection)
+{
+    vx_vec3_t edge1 = *tv1;
+    vx__vec3_sub(&edge1, tv0);
+    vx_vec3_t edge2 = *tv2;
+    vx__vec3_sub(&edge2, tv0);
+
+    vx_vec3_t h = vx__vec3_cross(ray_dir, &edge2);
+    float a = vx__vec3_dot(&edge1, &h);
+    if (a > -VOXELIZER_EPSILON && a < VOXELIZER_EPSILON)
+        return false;
+
+    float f = 1.0f / a;
+    vx_vec3_t s = *ray_origin;
+    vx__vec3_sub(&s, tv0);
+    float u = f * vx__vec3_dot(&s, &h);
+    if (u < 0.0f || u > 1.0f)
+        return false;
+
+    vx_vec3_t q = vx__vec3_cross(&s, &edge1);
+    float v = f * vx__vec3_dot(ray_dir, &q);
+    if (v < 0.0f || u + v > 1.0f)
+        return false;
+
+    float t = f * vx__vec3_dot(&edge2, &q);
+    if (t > VOXELIZER_EPSILON) {
+        *out_intersection = *ray_origin;
+        vx_vec3_t segment = *ray_dir;
+        vx__vec3_multiply(&segment, t);
+        vx__vec3_add(out_intersection, &segment);
+        return true;
+    } else
+        return false;
+}
+
+/**
+ * Tests a ray for intersection within a maximum distance against the triangles of the given mesh.
+ *
+ * @param m The mesh
+ * @param ray_origin The ray origin
+ * @param ray_dir The ray direction. Note: this vector must be normalized.
+ * @param max_distance the maximum distance from the ray origin to the triangle intersection point.
+ * @param out_normal Output variable for the matching triangle's normal.
+ * @return true if a matching triangle was found
+ * @return
+ */
+bool vx__ray_intersects_mesh(vx_mesh_t const* m,
+    vx_vec3_t* origin,
+    vx_vec3_t* ray_dir,
+    float max_distance,
+    vx_vec3_t* out_normal
+    )
+{
+    bool found = false;
+    float furthest_distance = -INFINITY;
+    size_t furthest_offset = 0;
+
+    for (size_t index_idx = 0; index_idx < m->nindices / 3; index_idx++) {
+        size_t offset = index_idx * 3;
+        vx_vec3_t* tv0 = m->vertices + m->indices[offset + 0];
+        vx_vec3_t* tv1 = m->vertices + m->indices[offset + 1];
+        vx_vec3_t* tv2 = m->vertices + m->indices[offset + 2];
+
+        vx_vec3_t intersection;
+        if (vx__ray_intersects_triangle(origin, ray_dir, tv0, tv1, tv2, &intersection)) {
+            vx__vec3_sub(&intersection, origin);
+            float distance = vx__vec3_length(&intersection);
+            if (distance < max_distance) {
+                found = true;
+                if (distance > furthest_distance) {
+                    furthest_distance = distance;
+                    furthest_offset = offset;
+                }
+            }
+        }
+    }
+
+    if (found) {
+        vx_vec3_t* tv0 = m->vertices + m->indices[furthest_offset + 0];
+        vx_vec3_t* tv1 = m->vertices + m->indices[furthest_offset + 1];
+        vx_vec3_t* tv2 = m->vertices + m->indices[furthest_offset + 2];
+
+        vx_vec3_t edge1 = *tv1;
+        vx__vec3_sub(&edge1, tv0);
+        vx_vec3_t edge2 = *tv2;
+        vx__vec3_sub(&edge2, tv1);
+        *out_normal = vx__vec3_cross(&edge1, &edge2);
+    }
+
+    return found;
+}
+
 void vx__aabb_init(vx_aabb_t* aabb)
 {
     aabb->max.x = aabb->max.y = aabb->max.z = -INFINITY;
@@ -710,11 +969,17 @@ vx_hash_table_t* vx__voxelize(vx_mesh_t const* m,
     vx_vertex_t vs,
     vx_vertex_t hvs,
     float precision,
-    size_t* nvoxels)
+    size_t* nvoxels,
+    bool fill_volume)
 {
     vx_hash_table_t* table = NULL;
 
     table = vx__hash_table_alloc(VOXELIZER_HASH_TABLE_SIZE);
+
+    vx_aabb_t span = {
+            .min = {INFINITY, INFINITY, INFINITY},
+            .max = {-INFINITY, -INFINITY, -INFINITY}
+    };
 
     for (size_t i = 0; i < m->nindices; i += 3) {
         vx_triangle_t triangle;
@@ -767,6 +1032,14 @@ vx_hash_table_t* vx__voxelize(vx_mesh_t const* m,
 
                     vx_vertex_t boxcenter = vx__aabb_center(&saabb);
                     vx_vertex_t halfsize = vx__aabb_half_size(&saabb);
+
+                    span.min.x = VX_MIN(boxcenter.x, span.min.x);
+                    span.min.y = VX_MIN(boxcenter.y, span.min.y);
+                    span.min.z = VX_MIN(boxcenter.z, span.min.z);
+
+                    span.max.x = VX_MAX(boxcenter.x, span.max.x);
+                    span.max.y = VX_MAX(boxcenter.y, span.max.y);
+                    span.max.z = VX_MAX(boxcenter.z, span.max.z);
 
                     // HACK: some holes might appear, this
                     // precision factor reduces the artifact
@@ -823,7 +1096,92 @@ vx_hash_table_t* vx__voxelize(vx_mesh_t const* m,
                         if (insert) {
                             (*nvoxels)++;
                         }
-                   }
+                    }
+                }
+            }
+        }
+    }
+
+    if (fill_volume) {
+        vx_grid_t* grid = vx__grid_alloc(&span, &vs);
+
+        for (size_t i = 0; i < table->size; ++i) {
+            if (!table->elements[i]) { continue; }
+
+            vx_hash_table_node_t* node = table->elements[i];
+            vx_voxel_data_t* voxeldata;
+
+            while (node) {
+                voxeldata = (vx_voxel_data_t*) node->data;
+                vx__grid_fill(grid, &voxeldata->position);
+
+                node = node->next;
+            }
+        }
+
+        for (size_t x = 0; x < grid->size.x; x++) {
+            for (size_t y = 0; y < grid->size.y; y++) {
+                bool is_outside = true;
+                for (size_t z = 0; z < grid->size.z; z++) {
+                    vx_vec3_t voxel_position;
+                    if (vx__grid_is_filled(grid, {x, y, z}, &voxel_position)) {
+                        if (is_outside) {
+                            bool has_shell_voxel = false;
+                            for (size_t z2 = z + 1; z2 < grid->size.z; z2++) {
+                                vx_vec3_t dummy_voxel_position;
+                                if (vx__grid_is_filled(grid, {x, y, z2}, &dummy_voxel_position)) {
+                                    has_shell_voxel = true;
+                                    break;
+                                }
+                            }
+                            if (!has_shell_voxel) {
+                                continue;
+                            }
+                        }
+
+                        // We are at a shell voxel.
+                        vx_vec3_t origin = {
+                                .x = voxel_position.x,
+                                .y = voxel_position.y,
+                                .z = voxel_position.z - vs.z * 0.5f
+                        };
+                        vx_vec3_t triangle_normal;
+                        vx_vec3_t z_plus = {0, 0, 1.f};
+                        if (vx__ray_intersects_mesh(m, &origin, &z_plus, vs.z,
+                                                    &triangle_normal)) {
+                            // For this particular case we only have to test the normal's Z
+                            // component to determine the normal's general direction.
+                            if (is_outside) {
+                                if (triangle_normal.z < 0) {
+                                    // We are outside the shell and the normal is pointing in an
+                                    // opposite direction.
+                                    is_outside = false;
+                                }
+                            } else {
+                                if (triangle_normal.z > 0) {
+                                    // We are inside the shell and the normal is pointing in a
+                                    // parallel direction.
+                                    is_outside = true;
+                                }
+                            }
+                        } else if (!is_outside) {
+                            is_outside = true;
+                        }
+                    } else if (!is_outside) {
+                        // We are inside the shell, so we can fill the interior voxels.
+                        size_t offset = vx__grid_node_offset(grid, {x, y, z});
+                        voxel_position = grid->nodes[offset].position;
+
+                        vx_voxel_data_t* nodedata = VX_MALLOC(vx_voxel_data_t, 1);
+                        nodedata->position = voxel_position;
+
+                        size_t hash = vx__vertex_hash(voxel_position, VOXELIZER_HASH_TABLE_SIZE);
+                        bool insert = vx__hash_table_insert(table, hash, nodedata,
+                                                            vx__vertex_comp_func);
+                        if (insert) {
+                            (*nvoxels)++;
+                        }
+                    }
                 }
             }
         }
@@ -836,7 +1194,8 @@ vx_mesh_t* vx_voxelize(vx_mesh_t const* m,
     float voxelsizex,
     float voxelsizey,
     float voxelsizez,
-    float precision)
+    float precision,
+    bool fill_volume)
 {
     vx_mesh_t* outmesh = NULL;
     vx_hash_table_t* table = NULL;
@@ -847,7 +1206,7 @@ vx_mesh_t* vx_voxelize(vx_mesh_t const* m,
 
     vx__vec3_multiply(&hvs, 0.5f);
 
-    table = vx__voxelize(m, vs, hvs, precision, &voxels);
+    table = vx__voxelize(m, vs, hvs, precision, &voxels, fill_volume);
 
     outmesh = VX_MALLOC(vx_mesh_t, 1);
     size_t nvertices = voxels * 8;
@@ -892,11 +1251,21 @@ vx_mesh_t* vx_voxelize(vx_mesh_t const* m,
     return outmesh;
 }
 
-vx_point_cloud_t* vx_voxelize_pc(vx_mesh_t const* mesh,
+vx_mesh_t* vx_voxelize(vx_mesh_t const* m,
     float voxelsizex,
     float voxelsizey,
     float voxelsizez,
     float precision)
+{
+    return vx_voxelize(m, voxelsizex, voxelsizey, voxelsizez, precision, false);
+}
+
+vx_point_cloud_t* vx_voxelize_pc(vx_mesh_t const* mesh,
+    float voxelsizex,
+    float voxelsizey,
+    float voxelsizez,
+    float precision,
+    bool fill_volume)
 {
     vx_point_cloud_t* pc = NULL;
     vx_hash_table_t* table = NULL;
@@ -907,11 +1276,11 @@ vx_point_cloud_t* vx_voxelize_pc(vx_mesh_t const* mesh,
 
     vx__vec3_multiply(&hvs, 0.5f);
 
-    table = vx__voxelize(mesh, vs, hvs, precision, &voxels);
+    table = vx__voxelize(mesh, vs, hvs, precision, &voxels, fill_volume);
 
     pc = VX_MALLOC(vx_point_cloud_t, 1);
     pc->vertices = VX_MALLOC(vx_vec3_t, voxels);
-    pc->colors = mesh->colors != NULL ? VX_MALLOC(vx_color_t, voxels) : NULL;
+    pc->colors = !fill_volume && mesh->colors != NULL ? VX_MALLOC(vx_color_t, voxels) : NULL;
     pc->nvertices = 0;
 
     for (size_t i = 0; i < table->size; ++i) {
@@ -1009,7 +1378,7 @@ unsigned int* vx_voxelize_snap_3dgrid(vx_mesh_t const* m,
     float resy = (meshaabb->max.y - meshaabb->min.y) / height;
     float resz = (meshaabb->max.z - meshaabb->min.z) / depth;
 
-    vx_point_cloud_t* pc = vx_voxelize_pc(m, resx, resy, resz, 0.0);
+    vx_point_cloud_t* pc = vx_voxelize_pc(m, resx, resy, resz, 0.0, false);
 
     aabb = VX_MALLOC(vx_aabb_t, 1);
 
