@@ -111,14 +111,6 @@ vx_mesh_t* vx_voxelize(vx_mesh_t const* mesh,       // The input mesh
                                                     // usually a precision = voxelsize / 10. works ok.
         bool fill_volume);                          // Whether to fill the volume or generate only the shell.
 
-// Overloaded for compatibility and clarity. (Filling a voxel volume mesh is mainly useful for debugging.)
-vx_mesh_t* vx_voxelize(vx_mesh_t const* mesh,       // The input mesh
-        float voxelsizex,                           // Voxel size on X-axis
-        float voxelsizey,                           // Voxel size on Y-axis
-        float voxelsizez,                           // Voxel size on Z-axis
-        float precision);                           // A precision factor that reduces "holes" artifact
-                                                    // usually a precision = voxelsize / 10. works ok.
-
 // vx_voxelize_snap_3d_grid: Voxelizes a triangle mesh to a 3d texture
 // The texture data is aligned as RGBA8 and can be uploaded as a 3d texture with OpenGL like so:
 // glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, width, height, depth, 0, GL_RGBA, GL_UNSIGNED_BYTE, texturedata);
@@ -330,7 +322,7 @@ typedef struct vx_grid {
     vx_grid_vec3_t size;
 } vx_grid_t;
 
-size_t vx__grid_node_offset(vx_grid_t* grid, vx_grid_vec3 position)
+size_t vx__grid_node_offset(vx_grid_t* grid, vx_grid_vec3_t position)
 {
     size_t offset = position.x * grid->size.y * grid->size.z +
         position.y * grid->size.z + position.z;
@@ -378,7 +370,8 @@ vx_grid_t* vx__grid_alloc(vx_aabb_t* span, vx_vec3_t* vs)
                         .z = position.z + (vs->z * aabb_precision),
                     },
                 };
-                size_t offset = vx__grid_node_offset(grid, {x, y, z});
+                vx_grid_vec3_t p = {x, y, z};
+                size_t offset = vx__grid_node_offset(grid, p);
                 vx_grid_node_t* node = &grid->nodes[offset];
                 node->aabb = aabb;
                 node->position = position;
@@ -401,7 +394,8 @@ bool vx__grid_resolve_grid_position(vx_grid_t* grid, vx_vec3_t* voxel_position, 
     for (size_t x = 0; x < grid->size.x; x++) {
         for (size_t y = 0; y < grid->size.y; y++) {
             for (size_t z = 0; z < grid->size.z; z++) {
-                size_t offset = vx__grid_node_offset(grid, {x, y, z});
+                vx_grid_vec3_t p = {x, y, z};
+                size_t offset = vx__grid_node_offset(grid, p);
                 vx_aabb_t* aabb = &grid->nodes[offset].aabb;
                 if (aabb->min.x <= voxel_position->x &&
                     aabb->min.y <= voxel_position->y &&
@@ -1124,12 +1118,14 @@ vx_hash_table_t* vx__voxelize(vx_mesh_t const* m,
                 bool is_outside = true;
                 for (size_t z = 0; z < grid->size.z; z++) {
                     vx_vec3_t voxel_position;
-                    if (vx__grid_is_filled(grid, {x, y, z}, &voxel_position)) {
+                    vx_grid_vec3_t p = {x, y, z};
+                    if (vx__grid_is_filled(grid, p, &voxel_position)) {
                         if (is_outside) {
                             bool has_shell_voxel = false;
                             for (size_t z2 = z + 1; z2 < grid->size.z; z2++) {
                                 vx_vec3_t dummy_voxel_position;
-                                if (vx__grid_is_filled(grid, {x, y, z2}, &dummy_voxel_position)) {
+                                p.z = z2;
+                                if (vx__grid_is_filled(grid, p, &dummy_voxel_position)) {
                                     has_shell_voxel = true;
                                     break;
                                 }
@@ -1169,7 +1165,8 @@ vx_hash_table_t* vx__voxelize(vx_mesh_t const* m,
                         }
                     } else if (!is_outside) {
                         // We are inside the shell, so we can fill the interior voxels.
-                        size_t offset = vx__grid_node_offset(grid, {x, y, z});
+                        vx_grid_vec3_t  p = {x, y, z};
+                        size_t offset = vx__grid_node_offset(grid, p);
                         voxel_position = grid->nodes[offset].position;
 
                         vx_voxel_data_t* nodedata = VX_MALLOC(vx_voxel_data_t, 1);
@@ -1249,15 +1246,6 @@ vx_mesh_t* vx_voxelize(vx_mesh_t const* m,
     vx__hash_table_free(table);
 
     return outmesh;
-}
-
-vx_mesh_t* vx_voxelize(vx_mesh_t const* m,
-    float voxelsizex,
-    float voxelsizey,
-    float voxelsizez,
-    float precision)
-{
-    return vx_voxelize(m, voxelsizex, voxelsizey, voxelsizez, precision, false);
 }
 
 vx_point_cloud_t* vx_voxelize_pc(vx_mesh_t const* mesh,
