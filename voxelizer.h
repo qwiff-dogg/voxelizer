@@ -491,8 +491,8 @@ vx_mesh_t* vx_color_mesh_alloc(int nvertices, int nindices)
 
 float vx__map_to_voxel(float position, float voxelSize, bool min)
 {
-    float vox = (position + (position < 0.f ? -1.f : 1.f) * voxelSize * 0.5f) / voxelSize;
-    return (min ? floor(vox) : ceil(vox)) * voxelSize;
+    float vox = roundf(position / voxelSize);
+    return (min ? (vox - 1) : (vox + 1)) * voxelSize;
 }
 
 vx_vec3_t vx__vec3_cross(vx_vec3_t* v1, vx_vec3_t* v2)
