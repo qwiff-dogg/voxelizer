@@ -3,7 +3,7 @@
 #include "../voxelizer.h"
 
 TEST_CASE("Volume", "[volume]") {
-    static constexpr float PRECISION_FACTOR = 0.1f;
+    static constexpr float PRECISION_FACTOR = 0.f;
 
     SECTION("Cube") {
         static constexpr float VOXEL_SIZE = 0.5f;
@@ -28,8 +28,8 @@ TEST_CASE("Volume", "[volume]") {
     SECTION("Bunny") {
         static constexpr float VOXEL_SIZE = 0.01f;
         static constexpr float PRECISION = VOXEL_SIZE * PRECISION_FACTOR;
-        static constexpr size_t SHELL_VOXELS = 975;
-        static constexpr size_t INTERIOR_VOXELS = 181;
+        static constexpr size_t SHELL_VOXELS = 828;
+        static constexpr size_t INTERIOR_VOXELS = 259;
 
         auto* mesh = load_obj_mesh("example/models/bunny.obj");
         REQUIRE(mesh != nullptr);
@@ -58,8 +58,8 @@ TEST_CASE("Volume", "[volume]") {
     SECTION("Monkey") {
         static constexpr float VOXEL_SIZE = 0.05f;
         static constexpr float PRECISION = VOXEL_SIZE * PRECISION_FACTOR;
-        static constexpr size_t SHELL_VOXELS = 9220;
-        static constexpr size_t INTERIOR_VOXELS = 5709;
+        static constexpr size_t SHELL_VOXELS = 7765;
+        static constexpr size_t INTERIOR_VOXELS = 6556;
 
         auto* mesh = load_obj_mesh("example/models/suzanne.obj");
         REQUIRE(mesh != nullptr);
@@ -88,8 +88,8 @@ TEST_CASE("Volume", "[volume]") {
     SECTION("Dragon") {
         static constexpr float VOXEL_SIZE = 0.05f;
         static constexpr float PRECISION = VOXEL_SIZE * PRECISION_FACTOR;
-        static constexpr size_t SHELL_VOXELS = 4495;
-        static constexpr size_t INTERIOR_VOXELS = 953;
+        static constexpr size_t SHELL_VOXELS = 4164;
+        static constexpr size_t INTERIOR_VOXELS = 882;
 
         auto* mesh = load_obj_mesh("example/models/dragon.obj");
         REQUIRE(mesh != nullptr);
