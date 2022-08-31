@@ -99,7 +99,9 @@ vx_point_cloud_t* vx_voxelize_pc(vx_mesh_t const* mesh, // The input mesh
                                  float voxelsizez,      // Voxel size on Z-axis
                                  float precision,       // A precision factor that reduces "holes artifact
                                                         // usually a precision = voxelsize / 10. works ok
-                                 bool fill_volume);     // Whether to fill the volume or generate only the shell.
+                                 float* volume);        // Pass non-null to fill the interior voxels.
+                                                        // Will be populated with volume of the triangular mesh.
+
 
 
 // vx_voxelize: Voxelizes a triangle mesh to a triangle mesh representing cubes
@@ -109,7 +111,8 @@ vx_mesh_t* vx_voxelize(vx_mesh_t const* mesh,       // The input mesh
         float voxelsizez,                           // Voxel size on Z-axis
         float precision,                            // A precision factor that reduces "holes" artifact
                                                     // usually a precision = voxelsize / 10. works ok.
-        bool fill_volume);                          // Whether to fill the volume or generate only the shell.
+        float* volume);                             // Pass non-null to fill the interior voxels.
+                                                    // Will be populated with volume of the triangular mesh.
 
 // vx_voxelize_snap_3d_grid: Voxelizes a triangle mesh to a 3d texture
 // The texture data is aligned as RGBA8 and can be uploaded as a 3d texture with OpenGL like so:
@@ -858,6 +861,17 @@ bool vx__ray_intersects_mesh(vx_mesh_t const* m,
     return found;
 }
 
+// https://stackoverflow.com/questions/1406029/how-to-calculate-the-volume-of-a-3d-mesh-object-the-surface-of-which-is-made-up
+float vx__signed_volume(const vx_triangle_t* t) {
+    float v321 = t->p3.x * t->p2.y * t->p1.z;
+    float v231 = t->p2.x * t->p3.y * t->p1.z;
+    float v312 = t->p3.x * t->p1.y * t->p2.z;
+    float v132 = t->p1.x * t->p3.y * t->p2.z;
+    float v213 = t->p2.x * t->p1.y * t->p3.z;
+    float v123 = t->p1.x * t->p2.y * t->p3.z;
+    return (1.0f / 6.0f) * (-v321 + v231 + v312 - v132 - v213 + v123);
+}
+
 void vx__aabb_init(vx_aabb_t* aabb)
 {
     aabb->max.x = aabb->max.y = aabb->max.z = -INFINITY;
@@ -964,7 +978,7 @@ vx_hash_table_t* vx__voxelize(vx_mesh_t const* m,
     vx_vertex_t hvs,
     float precision,
     size_t* nvoxels,
-    bool fill_volume)
+    float* volume)
 {
     vx_hash_table_t* table = NULL;
 
@@ -974,6 +988,10 @@ vx_hash_table_t* vx__voxelize(vx_mesh_t const* m,
             .min = {INFINITY, INFINITY, INFINITY},
             .max = {-INFINITY, -INFINITY, -INFINITY}
     };
+
+    if (volume) {
+        *volume = 0.f;
+    }
 
     for (size_t i = 0; i < m->nindices; i += 3) {
         vx_triangle_t triangle;
@@ -1002,6 +1020,10 @@ vx_hash_table_t* vx__voxelize(vx_mesh_t const* m,
             continue;
         }
 
+        if (volume) {
+            *volume += vx__signed_volume(&triangle);
+        }
+
         vx_aabb_t aabb = vx__triangle_aabb(&triangle);
 
         aabb.min.x = vx__map_to_voxel(aabb.min.x, vs.x, true);
@@ -1026,14 +1048,6 @@ vx_hash_table_t* vx__voxelize(vx_mesh_t const* m,
 
                     vx_vertex_t boxcenter = vx__aabb_center(&saabb);
                     vx_vertex_t halfsize = vx__aabb_half_size(&saabb);
-
-                    span.min.x = VX_MIN(boxcenter.x, span.min.x);
-                    span.min.y = VX_MIN(boxcenter.y, span.min.y);
-                    span.min.z = VX_MIN(boxcenter.z, span.min.z);
-
-                    span.max.x = VX_MAX(boxcenter.x, span.max.x);
-                    span.max.y = VX_MAX(boxcenter.y, span.max.y);
-                    span.max.z = VX_MAX(boxcenter.z, span.max.z);
 
                     // HACK: some holes might appear, this
                     // precision factor reduces the artifact
@@ -1089,6 +1103,14 @@ vx_hash_table_t* vx__voxelize(vx_mesh_t const* m,
 
                         if (insert) {
                             (*nvoxels)++;
+
+                            span.min.x = VX_MIN(boxcenter.x, span.min.x);
+                            span.min.y = VX_MIN(boxcenter.y, span.min.y);
+                            span.min.z = VX_MIN(boxcenter.z, span.min.z);
+
+                            span.max.x = VX_MAX(boxcenter.x, span.max.x);
+                            span.max.y = VX_MAX(boxcenter.y, span.max.y);
+                            span.max.z = VX_MAX(boxcenter.z, span.max.z);
                         }
                     }
                 }
@@ -1096,7 +1118,7 @@ vx_hash_table_t* vx__voxelize(vx_mesh_t const* m,
         }
     }
 
-    if (fill_volume) {
+    if (volume) {
         vx_grid_t* grid = vx__grid_alloc(&span, &vs);
 
         for (size_t i = 0; i < table->size; ++i) {
@@ -1192,7 +1214,7 @@ vx_mesh_t* vx_voxelize(vx_mesh_t const* m,
     float voxelsizey,
     float voxelsizez,
     float precision,
-    bool fill_volume)
+    float* volume)
 {
     vx_mesh_t* outmesh = NULL;
     vx_hash_table_t* table = NULL;
@@ -1203,7 +1225,7 @@ vx_mesh_t* vx_voxelize(vx_mesh_t const* m,
 
     vx__vec3_multiply(&hvs, 0.5f);
 
-    table = vx__voxelize(m, vs, hvs, precision, &voxels, fill_volume);
+    table = vx__voxelize(m, vs, hvs, precision, &voxels, volume);
 
     outmesh = VX_MALLOC(vx_mesh_t, 1);
     size_t nvertices = voxels * 8;
@@ -1253,7 +1275,7 @@ vx_point_cloud_t* vx_voxelize_pc(vx_mesh_t const* mesh,
     float voxelsizey,
     float voxelsizez,
     float precision,
-    bool fill_volume)
+    float* volume)
 {
     vx_point_cloud_t* pc = NULL;
     vx_hash_table_t* table = NULL;
@@ -1264,11 +1286,11 @@ vx_point_cloud_t* vx_voxelize_pc(vx_mesh_t const* mesh,
 
     vx__vec3_multiply(&hvs, 0.5f);
 
-    table = vx__voxelize(mesh, vs, hvs, precision, &voxels, fill_volume);
+    table = vx__voxelize(mesh, vs, hvs, precision, &voxels, volume);
 
     pc = VX_MALLOC(vx_point_cloud_t, 1);
     pc->vertices = VX_MALLOC(vx_vec3_t, voxels);
-    pc->colors = !fill_volume && mesh->colors != NULL ? VX_MALLOC(vx_color_t, voxels) : NULL;
+    pc->colors = volume == NULL && mesh->colors != NULL ? VX_MALLOC(vx_color_t, voxels) : NULL;
     pc->nvertices = 0;
 
     for (size_t i = 0; i < table->size; ++i) {
@@ -1366,7 +1388,7 @@ unsigned int* vx_voxelize_snap_3dgrid(vx_mesh_t const* m,
     float resy = (meshaabb->max.y - meshaabb->min.y) / height;
     float resz = (meshaabb->max.z - meshaabb->min.z) / depth;
 
-    vx_point_cloud_t* pc = vx_voxelize_pc(m, resx, resy, resz, 0.0, false);
+    vx_point_cloud_t* pc = vx_voxelize_pc(m, resx, resy, resz, 0.0, NULL);
 
     aabb = VX_MALLOC(vx_aabb_t, 1);
 

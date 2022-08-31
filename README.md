@@ -34,14 +34,15 @@ mesh = vx_mesh_alloc(nvertices, nindices);
 float precision = 0.01;
 
 // Run voxelization
-result = vx_voxelize(mesh, 0.025, 0.025, 0.025, precision, false);
+result = vx_voxelize(mesh, 0.025, 0.025, 0.025, precision, NULL);
 
 // Make a point cloud for the voxel shell
-pc = vx_voxelize_pc(mesh, 0.025, 0.025, 0.025, precision, false);
+pc = vx_voxelize_pc(mesh, 0.025, 0.025, 0.025, precision, NULL);
 
 // Make a point cloud for the entire voxel volume (shell and interior voxels)
 // Color information is not available for interior voxels.
-pc = vx_voxelize_pc(mesh, 0.025, 0.025, 0.025, precision, true);
+float volume = 0.f;
+pc = vx_voxelize_pc(mesh, 0.025, 0.025, 0.025, precision, &volume);
 
 vx_point_cloud_free(pc);
 vx_mesh_free(result);
