@@ -59,3 +59,63 @@ bool save_obj_mesh(const char* filename, const vx_mesh_t* mesh) {
     fclose(file);
     return true;
 }
+
+bool save_pcd_point_cloud(const char* filename, const vx_point_cloud_t* pc) {
+    auto* file = fopen(filename, "wb");
+    if (!file) {
+        return false;
+    }
+
+    fprintf(file, "VERSION .5\n");
+    fprintf(file, "FIELDS x y z\n");
+    fprintf(file, "SIZE %lu %lu %lu\n", sizeof(float), sizeof(float), sizeof(float));
+    fprintf(file, "TYPE F F F\n");
+    fprintf(file, "COUNT 1 1 1\n");
+    fprintf(file, "WIDTH %lu\n", pc->nvertices);
+    fprintf(file, "HEIGHT 1\n");
+    fprintf(file, "DATA ascii\n");
+
+    for (size_t vertex_idx = 0; vertex_idx < pc->nvertices; vertex_idx++) {
+        const auto& vertex = pc->vertices[vertex_idx];
+        fprintf(file, "%0.5f %0.5f %0.5f\n", vertex.x, vertex.y, vertex.z);
+    }
+
+    fclose(file);
+    return true;
+}
+
+// https://stackoverflow.com/questions/1406029/how-to-calculate-the-volume-of-a-3d-mesh-object-the-surface-of-which-is-made-up
+static float signed_volume(vx_vec3_t p1, vx_vec3_t p2, vx_vec3_t p3) {
+    float v321 = p3.x * p2.y * p1.z;
+    float v231 = p2.x * p3.y * p1.z;
+    float v312 = p3.x * p1.y * p2.z;
+    float v132 = p1.x * p3.y * p2.z;
+    float v213 = p2.x * p1.y * p3.z;
+    float v123 = p1.x * p2.y * p3.z;
+    return (1.0f / 6.0f) * (-v321 + v231 + v312 - v132 - v213 + v123);
+}
+
+float calculate_volume(const vx_mesh_t* m) {
+    float volume = 0.f;
+
+    for (size_t i = 0; i < m->nindices; i += 3) {
+        auto i1 = m->indices[i + 0];
+        auto i2 = m->indices[i + 1];
+        auto i3 = m->indices[i + 2];
+        auto p1 = m->vertices[i1];
+        auto p2 = m->vertices[i2];
+        auto p3 = m->vertices[i3];
+        volume += signed_volume(p1, p2, p3);
+    }
+
+    return volume;
+}
+
+float calculate_voxel_volume(const vx_point_cloud_t* pc, vx_vec3_t voxel_size) {
+    const float voxel_volume = voxel_size.x * voxel_size.y * voxel_size.z;
+    float volume = 0.f;
+    for (size_t i = 0; i < pc->nvertices; i++) {
+        volume += pc->occupancies[i] * voxel_volume;
+    }
+    return volume;
+}
