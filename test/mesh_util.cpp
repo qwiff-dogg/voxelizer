@@ -60,7 +60,25 @@ bool save_obj_mesh(const char* filename, const vx_mesh_t* mesh) {
     return true;
 }
 
-bool save_pcd_point_cloud(const char* filename, const vx_point_cloud_t* pc) {
+struct Point {
+    vx_vec3_t position;
+    bool is_shell;
+};
+
+static std::vector<Point> to_points(const vx_point_cloud_t* pc) {
+    auto points = std::vector<Point>(pc->nvertices);
+
+    for (size_t vertex_idx = 0; vertex_idx < pc->nvertices; vertex_idx++) {
+        points[vertex_idx] = Point{
+                .position = pc->vertices[vertex_idx],
+                .is_shell = pc->is_shell[vertex_idx],
+        };
+    }
+
+    return points;
+}
+
+static bool save_pcd_point_cloud(const char* filename, const std::vector<Point>& points) {
     auto* file = fopen(filename, "wb");
     if (!file) {
         return false;
@@ -71,17 +89,34 @@ bool save_pcd_point_cloud(const char* filename, const vx_point_cloud_t* pc) {
     fprintf(file, "SIZE %lu %lu %lu\n", sizeof(float), sizeof(float), sizeof(float));
     fprintf(file, "TYPE F F F\n");
     fprintf(file, "COUNT 1 1 1\n");
-    fprintf(file, "WIDTH %lu\n", pc->nvertices);
+    fprintf(file, "WIDTH %lu\n", points.size());
     fprintf(file, "HEIGHT 1\n");
     fprintf(file, "DATA ascii\n");
 
-    for (size_t vertex_idx = 0; vertex_idx < pc->nvertices; vertex_idx++) {
-        const auto& vertex = pc->vertices[vertex_idx];
-        fprintf(file, "%0.5f %0.5f %0.5f\n", vertex.x, vertex.y, vertex.z);
+    for (const auto& point: points) {
+        const auto& position = point.position;
+        fprintf(file, "%0.5f %0.5f %0.5f\n", position.x, position.y, position.z);
     }
 
     fclose(file);
     return true;
+}
+
+bool save_pcd_point_cloud(const char* filename, const vx_point_cloud_t* pc, const vx_point_cloud_t* overlay) {
+    auto points = to_points(pc);
+
+    if (overlay) {
+        auto overlay_points = to_points(overlay);
+        const auto begin = std::remove_if(overlay_points.begin(), overlay_points.end(), [](const auto& point) {
+            return point.is_shell;
+        });
+        overlay_points.erase(begin, overlay_points.end());
+        for (const auto& point: overlay_points) {
+            points.emplace_back(point);
+        }
+    }
+
+    return save_pcd_point_cloud(filename, points);
 }
 
 // https://stackoverflow.com/questions/1406029/how-to-calculate-the-volume-of-a-3d-mesh-object-the-surface-of-which-is-made-up
@@ -95,27 +130,30 @@ static float signed_volume(vx_vec3_t p1, vx_vec3_t p2, vx_vec3_t p3) {
     return (1.0f / 6.0f) * (-v321 + v231 + v312 - v132 - v213 + v123);
 }
 
-float calculate_volume(const vx_mesh_t* m) {
+float calculate_mesh_volume(const vx_mesh_t* mesh) {
     float volume = 0.f;
 
-    for (size_t i = 0; i < m->nindices; i += 3) {
-        auto i1 = m->indices[i + 0];
-        auto i2 = m->indices[i + 1];
-        auto i3 = m->indices[i + 2];
-        auto p1 = m->vertices[i1];
-        auto p2 = m->vertices[i2];
-        auto p3 = m->vertices[i3];
+    for (size_t i = 0; i < mesh->nindices; i += 3) {
+        auto i1 = mesh->indices[i + 0];
+        auto i2 = mesh->indices[i + 1];
+        auto i3 = mesh->indices[i + 2];
+        auto p1 = mesh->vertices[i1];
+        auto p2 = mesh->vertices[i2];
+        auto p3 = mesh->vertices[i3];
         volume += signed_volume(p1, p2, p3);
     }
 
     return volume;
 }
 
-float calculate_voxel_volume(const vx_point_cloud_t* pc, vx_vec3_t voxel_size) {
-    const float voxel_volume = voxel_size.x * voxel_size.y * voxel_size.z;
+float calculate_voxel_volume(vx_point_cloud_t* pc, vx_vec3_t size, bool count_shell) {
     float volume = 0.f;
+
     for (size_t i = 0; i < pc->nvertices; i++) {
-        volume += pc->occupancies[i] * voxel_volume;
+        if (count_shell && pc->is_shell[i] || !count_shell && !pc->is_shell[i]) {
+            volume += size.x * size.y * size.z;
+        }
     }
+
     return volume;
 }

@@ -2,6 +2,8 @@
 
 #include "../voxelizer.h"
 
+#include <vector>
+
 /**
  * Load a mesh from a Wavefront OBJ file.
  *
@@ -25,10 +27,11 @@ bool save_obj_mesh(const char* filename, const vx_mesh_t* mesh);
  * Saves a point cloud to a PCD file.
  *
  * @param filename
- * @param pc
+ * @param pc The point cloud
+ * @param overlay Optional overlay point cloud
  * @return <code>true</code> if the file was written.
  */
-bool save_pcd_point_cloud(const char* filename, const vx_point_cloud_t* pc);
+bool save_pcd_point_cloud(const char* filename, const vx_point_cloud_t* pc, const vx_point_cloud_t* overlay = nullptr);
 
 /**
  * Calculates the volume of the given mesh.
@@ -36,13 +39,17 @@ bool save_pcd_point_cloud(const char* filename, const vx_point_cloud_t* pc);
  * @param mesh
  * @return The mesh volume.
  */
-float calculate_volume(const vx_mesh_t* mesh);
+float calculate_mesh_volume(const vx_mesh_t* mesh);
 
 /**
- * Calculates the sum volume of the voxels in the point cloud.
+ * Calculates the volume of the voxels of the given type.
+ *
+ * To calculate the total volume of a filled point cloud, invoke this function once for the shell and once for the interior.
  *
  * @param pc The point cloud
- * @param voxel_size The voxel size
- * @return The voxel size
+ * @param size The voxel size
+ * @param count_shell Whether to count the shell or the interior voxels
+ * @return
  */
-float calculate_voxel_volume(const vx_point_cloud_t* pc, vx_vec3_t voxel_size);
+float calculate_voxel_volume(vx_point_cloud_t* pc, vx_vec3_t size, bool count_shell);
+

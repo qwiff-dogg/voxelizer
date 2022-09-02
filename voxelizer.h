@@ -89,7 +89,7 @@ typedef struct vx_point_cloud {
     vx_vertex_t* vertices;          // Contiguous point cloud vertices positions, each vertex corresponds
                                     // to the center of a voxel
     vx_color_t* colors;             // Contiguous point cloud vertices colors
-    float* occupancies;             // Contiguous point cloud volume occupancy, expressed as a factor of 0-1.
+    bool* is_shell;                 // Contiguous bools indicating if the vertex is on the shell or in the interior
     size_t nvertices;               // The number of vertices in the point cloud
 } vx_point_cloud_t;
 
@@ -100,9 +100,7 @@ vx_point_cloud_t* vx_voxelize_pc(vx_mesh_t const* mesh, // The input mesh
                                  float voxelsizez,      // Voxel size on Z-axis
                                  float precision,       // A precision factor that reduces "holes artifact
                                                         // usually a precision = voxelsize / 10. works ok
-                                 bool fill_interior,    // Whether to fill the voxel interior
-                                 size_t noccupancy_samples); // The number of samples for calculating voxel occupancy
-                                                             // Set to 0 to skip occupancy calculation
+                                 bool fill_interior);   // Whether to fill the voxel interior
 
 
 
@@ -239,8 +237,7 @@ typedef struct vx_hash_table {
 typedef struct vx_voxel_data {
     vx_vec3_t position;
     vx_color_t color;
-    vx_aabb_t aabb;
-    float occupancy;
+    bool is_shell;
 } vx_voxel_data_t;
 
 vx_hash_table_t* vx__hash_table_alloc(size_t size)
@@ -328,20 +325,20 @@ typedef struct vx_grid {
     vx_grid_position_t size;
 } vx_grid_t;
 
-size_t vx__grid_node_offset(vx_grid_t const* grid, vx_grid_position_t const* position)
+size_t vx__grid_node_offset(vx_grid_t const* grid, vx_grid_position_t position)
 {
-    size_t offset = position->x * grid->size.y * grid->size.z +
-        position->y * grid->size.z + position->z;
+    size_t offset = position.x * grid->size.y * grid->size.z +
+        position.y * grid->size.z + position.z;
     VX_ASSERT(offset < grid->size.x * grid->size.y * grid->size.z);
     return offset;
 }
 
-vx_grid_t* vx__grid_alloc(vx_aabb_t const* span, vx_vec3_t const* voxel_size)
+vx_grid_t* vx__grid_alloc(vx_aabb_t span, vx_vec3_t voxel_size)
 {
     vx_grid_position_t size = {
-            .x = (size_t) round((span->max.x - span->min.x) / voxel_size->x),
-            .y = (size_t) round((span->max.y - span->min.y) / voxel_size->y),
-            .z = (size_t) round((span->max.z - span->min.z) / voxel_size->z),
+            .x = (size_t) round((span.max.x - span.min.x) / voxel_size.x),
+            .y = (size_t) round((span.max.y - span.min.y) / voxel_size.y),
+            .z = (size_t) round((span.max.z - span.min.z) / voxel_size.z),
     };
     // Note that the span is min- and max-inclusive.
     size.x += 1;
@@ -360,24 +357,24 @@ vx_grid_t* vx__grid_alloc(vx_aabb_t const* span, vx_vec3_t const* voxel_size)
         for (size_t y_idx = 0; y_idx < size.y; y_idx++) {
             for (size_t z_idx = 0; z_idx < size.z; z_idx++) {
                 vx_vec3_t position = {
-                        .x = span->min.x + x_idx * voxel_size->x,
-                        .y = span->min.y + y_idx * voxel_size->y,
-                        .z = span->min.z + z_idx * voxel_size->z,
+                        .x = span.min.x + x_idx * voxel_size.x,
+                        .y = span.min.y + y_idx * voxel_size.y,
+                        .z = span.min.z + z_idx * voxel_size.z,
                 };
                 vx_aabb_t aabb = {
                     .min = {
-                        .x = position.x - (voxel_size->x * aabb_precision),
-                        .y = position.y - (voxel_size->y * aabb_precision),
-                        .z = position.z - (voxel_size->z * aabb_precision),
+                        .x = position.x - (voxel_size.x * aabb_precision),
+                        .y = position.y - (voxel_size.y * aabb_precision),
+                        .z = position.z - (voxel_size.z * aabb_precision),
                     },
                     .max = {
-                        .x = position.x + (voxel_size->x * aabb_precision),
-                        .y = position.y + (voxel_size->y * aabb_precision),
-                        .z = position.z + (voxel_size->z * aabb_precision),
+                        .x = position.x + (voxel_size.x * aabb_precision),
+                        .y = position.y + (voxel_size.y * aabb_precision),
+                        .z = position.z + (voxel_size.z * aabb_precision),
                     },
                 };
                 vx_grid_position_t p = {x_idx, y_idx, z_idx};
-                size_t offset = vx__grid_node_offset(grid, &p);
+                size_t offset = vx__grid_node_offset(grid, p);
                 vx_grid_node_t* node = &grid->nodes[offset];
                 node->aabb = aabb;
                 node->position = position;
@@ -396,21 +393,21 @@ void vx__grid_free(vx_grid_t* grid)
 }
 
 bool vx__grid_map_node_position(vx_grid_t const* grid,
-    vx_vec3_t const* voxel_position,
+    vx_vec3_t voxel_position,
     vx_grid_position_t* out_grid_position)
 {
     for (size_t x = 0; x < grid->size.x; x++) {
         for (size_t y = 0; y < grid->size.y; y++) {
             for (size_t z = 0; z < grid->size.z; z++) {
                 vx_grid_position_t p = {x, y, z};
-                size_t offset = vx__grid_node_offset(grid, &p);
+                size_t offset = vx__grid_node_offset(grid, p);
                 vx_aabb_t* aabb = &grid->nodes[offset].aabb;
-                if (aabb->min.x <= voxel_position->x &&
-                    aabb->min.y <= voxel_position->y &&
-                    aabb->min.z <= voxel_position->z &&
-                    aabb->max.x >= voxel_position->x &&
-                    aabb->max.y >= voxel_position->y &&
-                    aabb->max.z >= voxel_position->z) {
+                if (aabb->min.x <= voxel_position.x &&
+                    aabb->min.y <= voxel_position.y &&
+                    aabb->min.z <= voxel_position.z &&
+                    aabb->max.x >= voxel_position.x &&
+                    aabb->max.y >= voxel_position.y &&
+                    aabb->max.z >= voxel_position.z) {
                     out_grid_position->x = x;
                     out_grid_position->y = y;
                     out_grid_position->z = z;
@@ -423,25 +420,27 @@ bool vx__grid_map_node_position(vx_grid_t const* grid,
     return false;
 }
 
-void vx__grid_fill_node(vx_grid_t* grid, vx_vec3_t* voxel_position)
+void vx__grid_fill_node(vx_grid_t* grid, vx_vec3_t voxel_position)
 {
     vx_grid_position_t grid_position;
     bool found = vx__grid_map_node_position(grid, voxel_position, &grid_position);
     VX_ASSERT(found);
 
-    size_t offset = vx__grid_node_offset(grid, &grid_position);
+    size_t offset = vx__grid_node_offset(grid, grid_position);
     grid->nodes[offset].is_filled = true;
 }
 
-bool vx__grid_is_node_filled(vx_grid_t* grid, vx_grid_position_t* grid_position, vx_vec3_t* out_voxel_position)
+bool vx__grid_is_node_filled(vx_grid_t* grid, vx_grid_position_t grid_position, vx_vec3_t* out_voxel_position)
 {
-    VX_ASSERT(grid_position->x < grid->size.x);
-    VX_ASSERT(grid_position->y < grid->size.y);
-    VX_ASSERT(grid_position->z < grid->size.z);
+    VX_ASSERT(grid_position.x < grid->size.x);
+    VX_ASSERT(grid_position.y < grid->size.y);
+    VX_ASSERT(grid_position.z < grid->size.z);
 
     size_t offset = vx__grid_node_offset(grid, grid_position);
     if (grid->nodes[offset].is_filled) {
-        *out_voxel_position = grid->nodes[offset].position;
+        if (out_voxel_position) {
+            *out_voxel_position = grid->nodes[offset].position;
+        }
         return true;
     } else {
         return false;
@@ -972,7 +971,7 @@ void vx__add_voxel(vx_mesh_t* mesh,
  *
  * @param m The mesh
  * @param table The hash table of voxels
- * @param span The span to fill. This can be either the bounds of the entire mesh or the bounds of a voxel.
+ * @param span The span to fill.
  * @param vs The voxel size
  * @return The number of voxels added.
  */
@@ -981,7 +980,7 @@ size_t vx__fill_interior(const vx_mesh_t* m,
     vx_aabb_t span,
     vx_vec3_t vs)
 {
-    vx_grid_t* grid = vx__grid_alloc(&span, &vs);
+    vx_grid_t* grid = vx__grid_alloc(span, vs);
 
     for (size_t i = 0; i < table->size; ++i) {
         if (!table->elements[i]) { continue; }
@@ -989,7 +988,7 @@ size_t vx__fill_interior(const vx_mesh_t* m,
         vx_hash_table_node_t* node = table->elements[i];
         while (node) {
             vx_voxel_data_t* voxeldata = (vx_voxel_data_t*) node->data;
-            vx__grid_fill_node(grid, &voxeldata->position);
+            vx__grid_fill_node(grid, voxeldata->position);
             node = node->next;
         }
     }
@@ -1004,13 +1003,12 @@ size_t vx__fill_interior(const vx_mesh_t* m,
                 vx_vec3_t voxel_position;
                 vx_grid_position_t grid_position = {x, y, z};
 
-                if (vx__grid_is_node_filled(grid, &grid_position, &voxel_position)) {
+                if (vx__grid_is_node_filled(grid, grid_position, &voxel_position)) {
                     if (is_outside) {
                         bool has_shell_voxel = false;
                         for (size_t z2 = z + 1; z2 < grid->size.z; z2++) {
-                            vx_vec3_t dummy_voxel_position;
                             grid_position.z = z2;
-                            if (vx__grid_is_node_filled(grid, &grid_position, &dummy_voxel_position)) {
+                            if (vx__grid_is_node_filled(grid, grid_position, NULL)) {
                                 has_shell_voxel = true;
                                 break;
                             }
@@ -1053,12 +1051,12 @@ size_t vx__fill_interior(const vx_mesh_t* m,
                     grid_position.x = x;
                     grid_position.y = y;
                     grid_position.z = z;
-                    size_t offset = vx__grid_node_offset(grid, &grid_position);
+                    size_t offset = vx__grid_node_offset(grid, grid_position);
                     voxel_position = grid->nodes[offset].position;
 
                     vx_voxel_data_t* nodedata = VX_MALLOC(vx_voxel_data_t, 1);
                     nodedata->position = voxel_position;
-                    nodedata->occupancy = 1.0f; // Interior voxels have an occupancy of 1.
+                    nodedata->is_shell = false;
 
                     size_t hash = vx__vertex_hash(voxel_position, VOXELIZER_HASH_TABLE_SIZE);
                     bool insert = vx__hash_table_insert(table, hash, nodedata,
@@ -1075,100 +1073,12 @@ size_t vx__fill_interior(const vx_mesh_t* m,
     return nvoxels;
 }
 
-/**
- * Calculates the given voxel's occupancy by sampling slices of its AABB for intersection with the mesh.
- *
- * @param m The mesh
- * @param aabb The voxel bounds.
- * @param nsamples The number of samples along each axis. The complexity is O(n^3).
- */
-float vx__calculate_occupancy(vx_mesh_t const* m,
-    vx_aabb_t aabb,
-    size_t nsamples)
-{
-    vx_hash_table_t* const table = vx__hash_table_alloc(VOXELIZER_HASH_TABLE_SIZE);
-
-    const float inv_nsamples = 1.0f / (float) nsamples;
-    const size_t ntotalsamples = nsamples * nsamples * nsamples;
-    const float inv_ntotalsamples = 1.f / (float) ntotalsamples;
-
-    const vx_vec3_t sample_size = {
-            (aabb.max.x - aabb.min.x) * inv_nsamples,
-            (aabb.max.y - aabb.min.y) * inv_nsamples,
-            (aabb.max.z - aabb.min.z) * inv_nsamples,
-    };
-
-    vx_vec3_t half_sample_size = sample_size;
-    vx__vec3_multiply(&half_sample_size, 0.5f);
-
-    vx__vec3_add(&aabb.min, &half_sample_size);
-    vx__vec3_sub(&aabb.max, &half_sample_size);
-
-    float occupancy = 0.f;
-
-    size_t hits = 0;
-
-    for (size_t i = 0; i < m->nindices; i += 3) {
-        vx_triangle_t triangle;
-        unsigned int i1, i2, i3;
-
-        VX_ASSERT(m->indices[i + 0] < m->nvertices);
-        VX_ASSERT(m->indices[i + 1] < m->nvertices);
-        VX_ASSERT(m->indices[i + 2] < m->nvertices);
-
-        i1 = m->indices[i + 0];
-        i2 = m->indices[i + 1];
-        i3 = m->indices[i + 2];
-
-        triangle.p1 = m->vertices[i1];
-        triangle.p2 = m->vertices[i2];
-        triangle.p3 = m->vertices[i3];
-
-        for (size_t x_idx = 0; x_idx < nsamples; x_idx++) {
-            float x = aabb.min.x + x_idx * sample_size.x;
-
-            for (size_t y_idx = 0; y_idx < nsamples; y_idx++) {
-                float y = aabb.min.y + y_idx * sample_size.y;
-
-                for (size_t z_idx = 0; z_idx < nsamples; z_idx++) {
-                    float z = aabb.min.z + z_idx * sample_size.z;
-
-                    vx_vec3_t boxcenter = {x, y, z};
-
-                    if (vx__triangle_box_overlap(boxcenter, sample_size, triangle)) {
-                        vx_voxel_data_t* nodedata = VX_MALLOC(vx_voxel_data_t, 1);
-                        nodedata->position = boxcenter;
-
-                        size_t hash = vx__vertex_hash(boxcenter, VOXELIZER_HASH_TABLE_SIZE);
-
-                        bool insert = vx__hash_table_insert(table, hash, nodedata,
-                                                            vx__vertex_comp_func);
-                        if (insert) {
-                            occupancy += inv_ntotalsamples;
-                            hits++;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    size_t nvoxels = vx__fill_interior(m, table, aabb, sample_size);
-    VX_ASSERT(nvoxels < ntotalsamples);
-    occupancy += nvoxels * inv_ntotalsamples;
-
-    vx__hash_table_free(table);
-
-    return VX_MIN(occupancy, 1.0f);
-}
-
 vx_hash_table_t* vx__voxelize(vx_mesh_t const* m,
     vx_vertex_t vs,
     vx_vertex_t hvs,
     float precision,
     size_t* nvoxels,
-    bool fill_interior,
-    size_t noccupancy_samples)
+    bool fill_interior)
 {
     vx_hash_table_t* table = NULL;
 
@@ -1277,8 +1187,7 @@ vx_hash_table_t* vx__voxelize(vx_mesh_t const* m,
                         }
 
                         nodedata->position = boxcenter;
-                        nodedata->aabb = saabb;
-                        nodedata->occupancy = 0.0f;
+                        nodedata->is_shell = true;
 
                         size_t hash = vx__vertex_hash(boxcenter, VOXELIZER_HASH_TABLE_SIZE);
 
@@ -1304,21 +1213,6 @@ vx_hash_table_t* vx__voxelize(vx_mesh_t const* m,
 
     if (fill_interior) {
         *nvoxels += vx__fill_interior(m, table, span, vs);
-
-        if (noccupancy_samples > 0) {
-            for (size_t i = 0; i < table->size; ++i) {
-                if (!table->elements[i]) { continue; }
-
-                vx_hash_table_node_t* node = table->elements[i];
-                while (node) {
-                    vx_voxel_data_t* voxeldata = (vx_voxel_data_t*) node->data;
-                    if (voxeldata->occupancy == 0.f) {
-                        voxeldata->occupancy = vx__calculate_occupancy(m, voxeldata->aabb, noccupancy_samples);
-                    }
-                    node = node->next;
-                }
-            }
-        }
     }
 
     return table;
@@ -1340,7 +1234,7 @@ vx_mesh_t* vx_voxelize(vx_mesh_t const* m,
 
     vx__vec3_multiply(&hvs, 0.5f);
 
-    table = vx__voxelize(m, vs, hvs, precision, &voxels, fill_interior, 0);
+    table = vx__voxelize(m, vs, hvs, precision, &voxels, fill_interior);
 
     outmesh = VX_MALLOC(vx_mesh_t, 1);
     size_t nvertices = voxels * 8;
@@ -1390,8 +1284,7 @@ vx_point_cloud_t* vx_voxelize_pc(vx_mesh_t const* mesh,
     float voxelsizey,
     float voxelsizez,
     float precision,
-    bool fill_interior,
-    size_t noccupancy_samples)
+    bool fill_interior)
 {
     vx_point_cloud_t* pc = NULL;
     vx_hash_table_t* table = NULL;
@@ -1402,12 +1295,12 @@ vx_point_cloud_t* vx_voxelize_pc(vx_mesh_t const* mesh,
 
     vx__vec3_multiply(&hvs, 0.5f);
 
-    table = vx__voxelize(mesh, vs, hvs, precision, &voxels, fill_interior, noccupancy_samples);
+    table = vx__voxelize(mesh, vs, hvs, precision, &voxels, fill_interior);
 
     pc = VX_MALLOC(vx_point_cloud_t, 1);
     pc->vertices = VX_MALLOC(vx_vec3_t, voxels);
     pc->colors = !fill_interior && mesh->colors != NULL ? VX_MALLOC(vx_color_t, voxels) : NULL;
-    pc->occupancies = fill_interior && noccupancy_samples > 0 ? VX_MALLOC(float, voxels) : NULL;
+    pc->is_shell = VX_MALLOC(bool, voxels);
     pc->nvertices = 0;
 
     for (size_t i = 0; i < table->size; ++i) {
@@ -1419,7 +1312,7 @@ vx_point_cloud_t* vx_voxelize_pc(vx_mesh_t const* mesh,
         while (node) {
             voxeldata = (vx_voxel_data_t*) node->data;
             if (pc->colors) { pc->colors[pc->nvertices] = voxeldata->color; }
-            if (pc->occupancies) {pc->occupancies[pc->nvertices] = voxeldata->occupancy; }
+            if (pc->is_shell) { pc->is_shell[pc->nvertices] = voxeldata->is_shell; }
             pc->vertices[pc->nvertices++] = voxeldata->position;
 
             node = node->next;
@@ -1506,7 +1399,7 @@ unsigned int* vx_voxelize_snap_3dgrid(vx_mesh_t const* m,
     float resy = (meshaabb->max.y - meshaabb->min.y) / height;
     float resz = (meshaabb->max.z - meshaabb->min.z) / depth;
 
-    vx_point_cloud_t* pc = vx_voxelize_pc(m, resx, resy, resz, 0.0, false, 0);
+    vx_point_cloud_t* pc = vx_voxelize_pc(m, resx, resy, resz, 0.0, false);
 
     aabb = VX_MALLOC(vx_aabb_t, 1);
 
